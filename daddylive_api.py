@@ -5,7 +5,7 @@ import html
 from urllib.parse import urlparse, quote_plus, unquote
 from datetime import datetime, timedelta, timezone
 import threading
-import base64 # Import base64 module
+import base64
 
 class DaddyLiveAPI:
     def __init__(self):
@@ -39,7 +39,7 @@ class DaddyLiveAPI:
                 raise ValueError("Could not find baseurl in dl.xml")
         except Exception as e:
             print(f"Error initializing base URLs: {e}")
-            self.baseurl = 'https://daddylive.dad'
+            self.baseurl = 'https://daddylivestream.com'
 
         self.json_url = f'{self.baseurl}/stream/stream-%s.php'
         self.schedule_url = f'{self.baseurl}/schedule/schedule-generated.php'
@@ -76,7 +76,6 @@ class DaddyLiveAPI:
                 resp,
                 re.DOTALL
             )
-            print(f"DEBUG: Found {len(channel_items)} stream entries via updated regex.")
             for channel_id, name in channel_items:
                 streams_list.append({
                     'name': html.unescape(name.strip()),
@@ -136,12 +135,27 @@ class DaddyLiveAPI:
 
         try:
             response = requests.get(url_stream, headers=headers, timeout=10).text
-            iframes = re.findall(r'<a[^>]*href="([^"]+)"[^>]*>\s*<button[^>]*>\s*Player\s*2\s*</button>', response)
-            if not iframes:
-                print("No Player 2 iframe found in initial response.")
+            
+            # Try multiple patterns to find the player link
+            player_patterns = [
+                r'<a[^>]*href="([^"]+)"[^>]*>\s*<button[^>]*>\s*Player\s*2\s*</button>',
+                r'<a[^>]*href="(/cast[^"]+)"[^>]*>\s*<button',
+                r'href="(/cast[^"]*)"',
+                r'<a[^>]*href="([^"]+)"[^>]*>\s*<button[^>]*>.*?[Pp]layer.*?</button>',
+                r'<iframe[^>]*src="([^"]+)"',
+            ]
+            
+            url2 = None
+            for pattern in player_patterns:
+                iframes = re.findall(pattern, response, re.IGNORECASE | re.DOTALL)
+                if iframes:
+                    url2 = iframes[0]
+                    break
+            
+            if not url2:
+                print(f"No player link found for channel {channel_id}")
                 return None, None
 
-            url2 = iframes[0]
             if not url2.startswith('http'):
                 url2 = self.baseurl + url2
             url2 = url2.replace('//cast','/cast')
@@ -150,7 +164,7 @@ class DaddyLiveAPI:
             headers['Origin'] = urlparse(url2).scheme + "://" + urlparse(url2).netloc
             response = requests.get(url2, headers=headers, timeout=10).text
 
-            iframes = re.findall(r'iframe src="([^"]*)', response)
+            iframes = re.findall(r'iframe\s+src="([^"]*)', response, re.IGNORECASE)
             if not iframes:
                 print("No iframe src found in url2 response.")
                 return None, None
@@ -163,52 +177,60 @@ class DaddyLiveAPI:
             headers['Origin'] = urlparse(url3).scheme + "://" + urlparse(url3).netloc
             response = requests.get(url3, headers=headers, timeout=10).text
 
-            # --- CRITICAL FIXES FOR BASE64 DECODING AND REGEXES ---
-            # channelKey is NOT base64 encoded based on addon.py's parsing
-            channel_key_match = re.findall(r'channelKey = \"([^"]*)', response)
-            channel_key = channel_key_match[0] if channel_key_match else None
+            # Extract channel_key (NOT base64 encoded)
+            channel_key_match = re.search(r'const\s+CHANNEL_KEY\s*=\s*"([^"]+)"', response)
+            if not channel_key_match:
+                channel_key_match = re.search(r'channelKey\s*=\s*["\']([^"\']+)["\']', response)
+                if not channel_key_match:
+                    print("Could not find CHANNEL_KEY in response.")
+                    return None, None
+            channel_key = channel_key_match.group(1)
 
-            # These are extracted from atob() calls, so they ARE base64 encoded
-            auth_ts_b64 = re.findall(r'c = atob\("([^"]*)', response)
-            auth_rnd_b64 = re.findall(r'd = atob\("([^"]*)', response)
-            auth_sig_b64 = re.findall(r'e = atob\("([^"]*)', response)
-            auth_host_b64 = re.findall(r'a = atob\("([^"]*)', response) # Corrected regex for auth_host
-            auth_php_b64 = re.findall(r'b = atob\("([^"]*)', response)
-
-            if not all([channel_key, auth_ts_b64, auth_rnd_b64, auth_sig_b64, auth_host_b64, auth_php_b64]):
-                print("Failed to extract all authentication parameters (some might be base64).")
+            # Extract the bundled parameters (XJZ bundle - base64 encoded JSON)
+            bundle_match = re.search(r'const\s+XJZ\s*=\s*"([^"]+)"', response)
+            if not bundle_match:
+                print("Could not find XJZ bundle in response.")
                 return None, None
+            
+            bundle = bundle_match.group(1)
+            parts = json.loads(base64.b64decode(bundle).decode("utf-8"))
+            
+            # Now decode each part from base64
+            for k, v in parts.items():
+                parts[k] = base64.b64decode(v).decode("utf-8")
 
-            # Decode the base64 encoded parameters
-            auth_ts = base64.b64decode(auth_ts_b64[0]).decode('utf-8') if auth_ts_b64 else None
-            auth_rnd = base64.b64decode(auth_rnd_b64[0]).decode('utf-8') if auth_rnd_b64 else None
-            # auth_sig needs to be decoded first, then URL quoted
-            auth_sig_decoded = base64.b64decode(auth_sig_b64[0]).decode('utf-8') if auth_sig_b64 else None
-            auth_sig = quote_plus(auth_sig_decoded) if auth_sig_decoded else None
-
-            auth_host = base64.b64decode(auth_host_b64[0]).decode('utf-8') if auth_host_b64 else None
-            auth_php = base64.b64decode(auth_php_b64[0]).decode('utf-8') if auth_php_b64 else None
-
-            if not all([channel_key, auth_ts, auth_rnd, auth_sig, auth_host, auth_php]):
-                print("Failed to decode all authentication parameters after base64 processing.")
+            # Extract host array
+            host_array_match = re.search(r"host\s*=\s*\[([^\]]+)\]", response)
+            if not host_array_match:
+                print("Could not find host array in response.")
                 return None, None
+            
+            host_parts = [part.strip().strip("'\"") for part in host_array_match.group(1).split(',')]
+            host = ''.join(host_parts)
 
-            auth_url = f'{auth_host}{auth_php}?channel_id={channel_key}&ts={auth_ts}&rnd={auth_rnd}&sig={auth_sig}'
+            # Construct the authentication script path by XORing bytes
+            bx = [40, 60, 61, 33, 103, 57, 33, 57]
+            sc = ''.join(chr(b ^ 73) for b in bx)
+
+            # Build authentication URL
+            auth_url = (
+                f'{host}{sc}?channel_id={quote_plus(channel_key)}&'
+                f'ts={quote_plus(parts["b_ts"])}&'
+                f'rnd={quote_plus(parts["b_rnd"])}&'
+                f'sig={quote_plus(parts["b_sig"])}'
+            )
+
+            # Call authentication endpoint
             requests.get(auth_url, headers=headers, timeout=10)
 
-            # Continue with existing logic for host and server_lookup
-            host_match = re.findall('(?s)m3u8 =.*?:.*?:.*?\".*?\".*?\"([^\"]*)', response)
-            if not host_match:
-                print("Could not find m3u8 host in response.")
-                return None, None
-            host = host_match[0]
-
-            server_lookup_match = re.findall('n fetchWithRetry\\(\\s*\'([^\']*)', response)
+            # Get server lookup URL
+            server_lookup_match = re.findall(r'fetchWithRetry\(\s*["\']([^"\']*)', response)
             if not server_lookup_match:
                 print("Could not find server lookup URL in response.")
                 return None, None
             server_lookup = server_lookup_match[0]
 
+            # Get server key
             server_lookup_url = f"https://{urlparse(url3).netloc}{server_lookup}{channel_key}"
             server_response = requests.get(server_lookup_url, headers=headers, timeout=10).json()
             server_key = server_response.get('server_key')
@@ -217,11 +239,16 @@ class DaddyLiveAPI:
                 print("Could not get server_key from server lookup.")
                 return None, None
 
-            final_hls_url = f'https://{server_key}{host}{server_key}/{channel_key}/mono.m3u8'
+            # Construct final HLS URL based on server_key
+            host_raw = f"https://{urlparse(url3).netloc}"
+            if server_key == "top1/cdn":
+                final_hls_url = f"https://top1.newkso.ru/top1/cdn/{channel_key}/mono.m3u8"
+            else:
+                final_hls_url = f"https://{server_key}new.newkso.ru/{server_key}/{channel_key}/mono.m3u8"
 
             hls_headers = {
-                'Referer': f"https://{urlparse(url3).netloc}/",
-                'Origin': f"https://{urlparse(url3).netloc}",
+                'Referer': f"{host_raw}/",
+                'Origin': host_raw,
                 'User-Agent': self.UA,
                 'Connection': 'keep-alive'
             }
