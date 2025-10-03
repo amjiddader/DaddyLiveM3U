@@ -43,6 +43,7 @@ class DaddyLiveAPI:
 
         self.json_url = f'{self.baseurl}/stream/stream-%s.php'
         self.schedule_url = f'{self.baseurl}/schedule/schedule-generated.php'
+        print(f"[DEBUG] Base URL initialized: {self.baseurl}")
 
     def get_headers(self, referer_override=None, origin_override=None):
         headers = {
@@ -119,11 +120,14 @@ class DaddyLiveAPI:
         return all_events
 
     def resolve_stream(self, channel_id):
+        print(f"\n[DEBUG] === Resolving stream for channel {channel_id} ===")
+        
         with self.cache_lock:
             cached = self.stream_cache.get(channel_id)
             if cached:
                 url, headers, timestamp = cached
                 if datetime.now() - timestamp < timedelta(minutes=self.cache_expiry_minutes):
+                    print(f"[DEBUG] Using cached stream for channel {channel_id}")
                     return url, headers
                 del self.stream_cache[channel_id]
 
@@ -132,9 +136,11 @@ class DaddyLiveAPI:
 
         url_stream = self.json_url % channel_id
         headers = self.get_headers()
+        print(f"[DEBUG] Step 1: Fetching {url_stream}")
 
         try:
             response = requests.get(url_stream, headers=headers, timeout=10).text
+            print(f"[DEBUG] Step 1 response length: {len(response)} chars")
             
             # Try multiple patterns to find the player link
             player_patterns = [
@@ -146,54 +152,73 @@ class DaddyLiveAPI:
             ]
             
             url2 = None
-            for pattern in player_patterns:
+            for i, pattern in enumerate(player_patterns):
                 iframes = re.findall(pattern, response, re.IGNORECASE | re.DOTALL)
                 if iframes:
                     url2 = iframes[0]
+                    print(f"[DEBUG] Step 1: Pattern {i} matched: {url2}")
                     break
             
             if not url2:
-                print(f"No player link found for channel {channel_id}")
+                print(f"[ERROR] Step 1: No player link found.")
+                # Try to find ANY links for debugging
+                all_links = re.findall(r'href="([^"]+)"', response)
+                print(f"[DEBUG] All links found: {all_links[:10]}")  # First 10 links
                 return None, None
 
             if not url2.startswith('http'):
                 url2 = self.baseurl + url2
             url2 = url2.replace('//cast','/cast')
+            print(f"[DEBUG] Step 2: Fetching {url2}")
 
             headers['Referer'] = url2
             headers['Origin'] = urlparse(url2).scheme + "://" + urlparse(url2).netloc
             response = requests.get(url2, headers=headers, timeout=10).text
+            print(f"[DEBUG] Step 2 response length: {len(response)} chars")
 
             iframes = re.findall(r'iframe\s+src="([^"]*)', response, re.IGNORECASE)
             if not iframes:
-                print("No iframe src found in url2 response.")
+                print("[ERROR] Step 2: No iframe src found.")
                 return None, None
 
             url3 = iframes[0]
+            print(f"[DEBUG] Step 2: Found iframe: {url3}")
+            
             if not url3.startswith('http'):
                 url3 = f"https://{urlparse(headers['Referer']).netloc}{url3}"
+            print(f"[DEBUG] Step 3: Fetching {url3}")
 
             headers['Referer'] = url3
             headers['Origin'] = urlparse(url3).scheme + "://" + urlparse(url3).netloc
             response = requests.get(url3, headers=headers, timeout=10).text
+            print(f"[DEBUG] Step 3 response length: {len(response)} chars")
 
             # Extract channel_key (NOT base64 encoded)
             channel_key_match = re.search(r'const\s+CHANNEL_KEY\s*=\s*"([^"]+)"', response)
             if not channel_key_match:
                 channel_key_match = re.search(r'channelKey\s*=\s*["\']([^"\']+)["\']', response)
                 if not channel_key_match:
-                    print("Could not find CHANNEL_KEY in response.")
+                    print("[ERROR] Step 3: Could not find CHANNEL_KEY. Checking for other variable names...")
+                    # Look for ANY const declarations for debugging
+                    all_consts = re.findall(r'const\s+(\w+)\s*=', response)
+                    print(f"[DEBUG] All const variables found: {all_consts[:20]}")
                     return None, None
             channel_key = channel_key_match.group(1)
+            print(f"[DEBUG] Step 3: Found CHANNEL_KEY: {channel_key}")
 
-            # Extract the bundled parameters (XJZ bundle - base64 encoded JSON)
-            bundle_match = re.search(r'const\s+XJZ\s*=\s*"([^"]+)"', response)
+            # Extract the bundled parameters (XKZK bundle - base64 encoded JSON)
+            bundle_match = re.search(r'const\s+XKZK\s*=\s*"([^"]+)"', response)
             if not bundle_match:
-                print("Could not find XJZ bundle in response.")
-                return None, None
+                bundle_match = re.search(r'const\s+XJZ\s*=\s*"([^"]+)"', response)
+                if not bundle_match:
+                    print("[ERROR] Step 3: Could not find XKZK or XJZ bundle")
+                    return None, None
             
             bundle = bundle_match.group(1)
+            print(f"[DEBUG] Step 3: Found bundle (first 50 chars): {bundle[:50]}...")
+            
             parts = json.loads(base64.b64decode(bundle).decode("utf-8"))
+            print(f"[DEBUG] Step 3: Decoded bundle keys: {list(parts.keys())}")
             
             # Now decode each part from base64
             for k, v in parts.items():
@@ -202,11 +227,12 @@ class DaddyLiveAPI:
             # Extract host array
             host_array_match = re.search(r"host\s*=\s*\[([^\]]+)\]", response)
             if not host_array_match:
-                print("Could not find host array in response.")
+                print("[ERROR] Step 3: Could not find host array")
                 return None, None
             
             host_parts = [part.strip().strip("'\"") for part in host_array_match.group(1).split(',')]
             host = ''.join(host_parts)
+            print(f"[DEBUG] Step 3: Found host: {host}")
 
             # Construct the authentication script path by XORing bytes
             bx = [40, 60, 61, 33, 103, 57, 33, 57]
@@ -219,24 +245,30 @@ class DaddyLiveAPI:
                 f'rnd={quote_plus(parts["b_rnd"])}&'
                 f'sig={quote_plus(parts["b_sig"])}'
             )
+            print(f"[DEBUG] Step 4: Calling auth URL: {auth_url[:80]}...")
 
             # Call authentication endpoint
-            requests.get(auth_url, headers=headers, timeout=10)
+            auth_response = requests.get(auth_url, headers=headers, timeout=10)
+            print(f"[DEBUG] Step 4: Auth response status: {auth_response.status_code}")
 
             # Get server lookup URL
             server_lookup_match = re.findall(r'fetchWithRetry\(\s*["\']([^"\']*)', response)
             if not server_lookup_match:
-                print("Could not find server lookup URL in response.")
+                print("[ERROR] Step 3: Could not find server lookup URL")
                 return None, None
             server_lookup = server_lookup_match[0]
+            print(f"[DEBUG] Step 5: Found server lookup: {server_lookup}")
 
             # Get server key
             server_lookup_url = f"https://{urlparse(url3).netloc}{server_lookup}{channel_key}"
+            print(f"[DEBUG] Step 5: Calling server lookup: {server_lookup_url}")
+            
             server_response = requests.get(server_lookup_url, headers=headers, timeout=10).json()
             server_key = server_response.get('server_key')
+            print(f"[DEBUG] Step 5: Server response: {server_response}")
 
             if not server_key:
-                print("Could not get server_key from server lookup.")
+                print("[ERROR] Step 5: Could not get server_key from server lookup")
                 return None, None
 
             # Construct final HLS URL based on server_key
@@ -245,6 +277,8 @@ class DaddyLiveAPI:
                 final_hls_url = f"https://top1.newkso.ru/top1/cdn/{channel_key}/mono.m3u8"
             else:
                 final_hls_url = f"https://{server_key}new.newkso.ru/{server_key}/{channel_key}/mono.m3u8"
+
+            print(f"[DEBUG] Step 6: Final HLS URL: {final_hls_url}")
 
             hls_headers = {
                 'Referer': f"{host_raw}/",
@@ -256,11 +290,13 @@ class DaddyLiveAPI:
             with self.cache_lock:
                 self.stream_cache[channel_id] = (final_hls_url, hls_headers, datetime.now())
 
+            print(f"[DEBUG] === Successfully resolved stream for channel {channel_id} ===\n")
             return final_hls_url, hls_headers
 
         except Exception as e:
             import traceback
-            print(f"Error resolving stream: {e}\n{traceback.format_exc()}")
+            print(f"[ERROR] Exception in resolve_stream: {e}")
+            print(traceback.format_exc())
             return None, None
 
 daddylive_api = DaddyLiveAPI()
