@@ -1,11 +1,14 @@
 import re
 import requests
+from requests.packages.urllib3.exceptions import InsecureRequestWarning
 import json
 import html
 from urllib.parse import urlparse, quote_plus, unquote
 from datetime import datetime, timedelta, timezone
 import threading
 import base64
+
+requests.packages.urllib3.disable_warnings(InsecureRequestWarning)
 
 class DaddyLiveAPI:
     def __init__(self):
@@ -15,6 +18,7 @@ class DaddyLiveAPI:
         self.UA = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36'
 
         self.session = requests.Session()
+        self.session.verify = False
         self.session.headers.update({
             'User-Agent': self.UA,
             'Connection': 'Keep-Alive'
@@ -90,7 +94,7 @@ class DaddyLiveAPI:
         headers = self.get_headers()
         all_events = {}
         try:
-            schedule = requests.get(self.schedule_url, headers=headers, timeout=10).json()
+            schedule = requests.get(self.schedule_url, headers=headers, timeout=10, verify=False).json()
             for date_key, events_by_category in schedule.items():
                 for categ, events_list in events_by_category.items():
                     category_name = categ.replace('</span>', '').strip()
@@ -139,7 +143,7 @@ class DaddyLiveAPI:
         print(f"[DEBUG] Step 1: Fetching {url_stream}")
 
         try:
-            response = requests.get(url_stream, headers=headers, timeout=10).text
+            response = requests.get(url_stream, headers=headers, timeout=10, verify=False).text
             print(f"[DEBUG] Step 1 response length: {len(response)} chars")
             
             # Try multiple patterns to find the player link
@@ -173,7 +177,7 @@ class DaddyLiveAPI:
 
             headers['Referer'] = url2
             headers['Origin'] = urlparse(url2).scheme + "://" + urlparse(url2).netloc
-            response = requests.get(url2, headers=headers, timeout=10).text
+            response = requests.get(url2, headers=headers, timeout=10, verify=False).text
             print(f"[DEBUG] Step 2 response length: {len(response)} chars")
 
             iframes = re.findall(r'iframe\s+src="([^"]*)', response, re.IGNORECASE)
@@ -190,7 +194,7 @@ class DaddyLiveAPI:
 
             headers['Referer'] = url3
             headers['Origin'] = urlparse(url3).scheme + "://" + urlparse(url3).netloc
-            response = requests.get(url3, headers=headers, timeout=10).text
+            response = requests.get(url3, headers=headers, timeout=10, verify=False).text
             print(f"[DEBUG] Step 3 response length: {len(response)} chars")
 
             # Extract channel_key (NOT base64 encoded)
@@ -248,7 +252,7 @@ class DaddyLiveAPI:
             print(f"[DEBUG] Step 4: Calling auth URL: {auth_url[:80]}...")
 
             # Call authentication endpoint
-            auth_response = requests.get(auth_url, headers=headers, timeout=10)
+            auth_response = requests.get(auth_url, headers=headers, timeout=10, verify=False)
             print(f"[DEBUG] Step 4: Auth response status: {auth_response.status_code}")
 
             # Get server lookup URL
@@ -263,7 +267,7 @@ class DaddyLiveAPI:
             server_lookup_url = f"https://{urlparse(url3).netloc}{server_lookup}{channel_key}"
             print(f"[DEBUG] Step 5: Calling server lookup: {server_lookup_url}")
             
-            server_response = requests.get(server_lookup_url, headers=headers, timeout=10).json()
+            server_response = requests.get(server_lookup_url, headers=headers, timeout=10, verify=False).json()
             server_key = server_response.get('server_key')
             print(f"[DEBUG] Step 5: Server response: {server_response}")
 

@@ -8,6 +8,7 @@ import time
 import html
 from urllib.parse import urlparse, urljoin, quote, unquote_plus
 import requests
+from requests.packages.urllib3.exceptions import InsecureRequestWarning
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 from xml.etree.ElementTree import Element, SubElement, tostring
@@ -15,6 +16,8 @@ from xml.dom import minidom
 from datetime import datetime, timedelta, timezone
 from apscheduler.schedulers.background import BackgroundScheduler
 from collections import defaultdict
+
+requests.packages.urllib3.disable_warnings(InsecureRequestWarning)
 
 app = Flask(__name__)
 
@@ -30,6 +33,7 @@ retries = Retry(total=5,
                 allowed_methods=frozenset(['GET', 'POST']))
 session.mount('http://', HTTPAdapter(max_retries=retries))
 session.mount('https://', HTTPAdapter(max_retries=retries))
+session.verify = False
 
 # --- Database Helpers (Task 1) ---
 
@@ -70,6 +74,7 @@ class ChannelNameUpdater:
     def __init__(self):
         self.UA = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36'
         self.session = requests.Session()
+        self.session.verify = False
         self.session.headers.update({'User-Agent': self.UA, 'Connection': 'Keep-Alive'})
         self.baseurl = 'https://daddylivestream.com' # Fallback/Direct use of the common URL
         self._initialize_base_url()
@@ -343,7 +348,7 @@ def generate_xmltv_from_m3u():
     from datetime import datetime, timedelta, timezone
 
     m3u_url = f"{request.url_root.rstrip('/')}/daddylive/events.m3u"
-    r = requests.get(m3u_url)
+    r = requests.get(m3u_url, verify=False)
     if r.status_code != 200:
         return "Failed to fetch M3U", 500
 
