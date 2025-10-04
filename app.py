@@ -1,4 +1,4 @@
-from flask import Flask, Response, request, stream_with_context, abort
+from flask import Flask, Response, request, stream_with_context, abort, jsonify
 # NOTE: daddylive_api is still imported but its live_tv logic is replaced by DB.
 from daddylive_api import daddylive_api # Assuming this is the instantiated object
 import re
@@ -220,6 +220,7 @@ def generate_dynamic_m3u(m3u_filename):
 
 
 # --- HLS Stream Proxy (STABILITY FIX APPLIED) ---
+@app.route('/aes/<channel_id>/<path:proxied_path>')
 @app.route('/daddylive/hls/<channel_id>/<path:proxied_path>')
 def hls_proxy(channel_id, proxied_path):
     original_requested_resource = unquote_plus(proxied_path)
@@ -276,6 +277,15 @@ def hls_proxy(channel_id, proxied_path):
         if proxy_content:
             content = upstream_response.text
             rewritten_lines = []
+            channel_path_segment = f'/{channel_id}/'
+            if channel_path_segment in request.path:
+                route_prefix = request.path.split(channel_path_segment, 1)[0]
+                if not route_prefix:
+                    route_prefix = '/'
+            else:
+                route_prefix = '/daddylive/hls'
+            if route_prefix != '/' and route_prefix.endswith('/'):
+                route_prefix = route_prefix.rstrip('/')
             for line in content.splitlines():
                 stripped = line.strip()
                 if stripped.startswith('#EXT-X-KEY'):
@@ -284,12 +294,12 @@ def hls_proxy(channel_id, proxied_path):
                         method = key_match.group(1)
                         key_uri = key_match.group(2)
                         resolved_key = urljoin(upstream_file_url, key_uri)
-                        proxied_key = f'/daddylive/hls/{channel_id}/{quote(resolved_key,safe="")}'
+                        proxied_key = f'{route_prefix}/{channel_id}/{quote(resolved_key,safe="")}'
                         rewritten_lines.append(f'#EXT-X-KEY:METHOD={method},URI="{proxied_key}"')
                         continue
                 if stripped and not stripped.startswith('#'):
                     resolved_media = urljoin(upstream_file_url, stripped)
-                    proxied_media = f'/daddylive/hls/{channel_id}/{quote(resolved_media,safe="")}'
+                    proxied_media = f'{route_prefix}/{channel_id}/{quote(resolved_media,safe="")}'
                     rewritten_lines.append(proxied_media)
                 else:
                     rewritten_lines.append(line)
@@ -388,6 +398,10 @@ def generate_xmltv_from_m3u():
 
 
 # --- Force Refresh Endpoint ---
+@app.route('/')
+def root_status():
+    return jsonify(status="alive")
+
 @app.route('/daddylive/refresh_names', methods=['POST'])
 def force_refresh_names():
     """Endpoint to manually trigger channel name update."""
@@ -395,7 +409,7 @@ def force_refresh_names():
     return Response("Channel names refreshed successfully.", mimetype="text/plain")
 
 # --- Index ---
-@app.route('/')
+@app.route('/docs')
 def index():
     base = request.url_root.rstrip('/')
     
